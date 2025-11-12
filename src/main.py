@@ -13,18 +13,36 @@ import socket
 import ssl
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from colorama import Fore, Back, Style, init
+init(autoreset=True) # sorgt dafür, dass die Farben nach jedem Print resetet werden 
+
 # Konfigurationen/ Globals
 DEFAULT_TIMEOUT = 1.5    # Timeout für normale Verbindungen
 DEFAULT_TLS_TIMEOUT = 3.0 # Timeout für TLS Verbindungen
 DEFAULT_WORKERS = 100 # Max gleichzeitige Threads
 
+DEBUG = False
 
 openPorts = 0 # Globaler Zähler für gefundenen Offene Ports‚
 openPortsLock = threading.Lock() # Schutz damit Threads nicht gleichzeitig Werte bearbeitet
 
 # IN ARBEIT Später zum Speichern für weitere Infos 
-foundServices = [] #Liste mit (port, Beschreibung, extra Infos)
+foundServices = [] #z.B. Liste mit port, Beschreibung, extra Infos
 foundServicesLock = threading.Lock() # Lock für die gemeinsame Nutzung der List
+
+# -----------------------
+# Farbschema 
+# -----------------------
+
+CLR_HEADER = Fore.CYAN               # App-Titel & Meta-Infos
+CLR_INFO   = Fore.WHITE              # neutrale Infos
+CLR_OK     = Fore.GREEN              # offene Ports bzw. erfolgreiche Aktionen
+CLR_WARN   = Fore.LIGHTYELLOW_EX     # Warnungen & Hinweise
+CLR_ERR    = Fore.RED                # Fehler & Abbrüche
+CLR_TLS    = Fore.LIGHTBLUE_EX       # TLS Zertifikate
+CLR_BANNER = Fore.LIGHTMAGENTA_EX    # Banner Ausgaben (z.B. Serverantworten)
+
 
 #Funktionen
 def parse_port_range(inp):
@@ -61,7 +79,7 @@ def parse_port_range(inp):
                 pass
 
     # Fallback: falls ungültig -> Standard 0-1023
-    print("Ungültige Eingabe — Standard 0-1023 wird verwendet.")
+    print(CLR_WARN + "[!] Ungültige Eingabe — Standard 0-1023 wird verwendet.")
     return range(0, 1024)
 
 # Banner Grabbing + TLS
@@ -80,10 +98,10 @@ def tryRecv(socketObj: socket.socket, timeout: float = 1.0) -> str:
             return ""
         return data.decode(errors="replace").strip()
     except socket.timeout:
-        print("tryRecv: timeout")
+        print(CLR_WARN + "[!] tryRecv: timeout")
         return ""
     except Exception as e:
-        print(f"tryRecv: exception: {e}")
+        print(CLR_WARN + f"[!] tryRecv: exception: {e}")
         return ""
 
 def grab_tls_cert(host, port):
@@ -138,7 +156,7 @@ def scan_port(host, port):
     global openPorts
     try:
         with socket.create_connection((host, port), timeout=1.5): # Socket Create unterstützt auch IPv6
-            print(f"[+] Port {port} ist offen.")
+            print(CLR_OK + f"[+] Port {port} ist offen.")
             # Mehrere Threads greifen gleichzeitig auf die Variable `openPorts` zu.
             # Der Lock stellt sicher, dass immer nur ein Thread diesen Zähler verändert,
             # um Race Conditions (Fehler durch gleichzeitige Zugriffe) zu verhindern.
@@ -152,51 +170,57 @@ def scan_port(host, port):
             
             #Ergebnisse
             if banner:
-                print(f" └─ Banner: {banner[:80]}")  # nur ersten Teil ausgeben
-            if tls_info:
-                print(f" └─ TLS-Zertifikat gefunden ({tls_info['issuer']})")
+                print(f"    {CLR_BANNER}└─{Style.RESET_ALL} Banner:")
+                print(f"       {CLR_INFO}{banner.strip()}")
 
-    except:
-        # Mögliche Fehler wie Timeout, Refused, Reset,... sind völlig normal
-        # Wir ignorieren diese bewusst, da wir nur offene Ports augeben wollen.
-        # optional könnte man dies loggen
+            if tls_info:
+                print(f"    {CLR_TLS}└─{Style.RESET_ALL} TLS-Zertifikat gefunden:")
+                print(f"       {CLR_INFO}{tls_info}")
+
+    except Exception as e:
+        if DEBUG:
+            # beim Entwickeln nützlich: zeigt, warum ein Port nicht gescannt werden konnte
+            print(CLR_WARN + f"[!] Fehler bei Port {port}: {e}")
+        # Produktion: ignorieren, weil Timeouts/Refused normal sind
         pass
 
 #Haupt Scan Funktion
 def main_scan(host, ports, max_workers=100):
-    print(f"Starte Scan auf {host} ({len(ports)} Ports)...")
+    print(CLR_OK + f"Starte Scan auf {host} ({len(ports)} Ports)...")
 
     # Auflösen des Hostnamens in IP
     try:
         resolved = socket.gethostbyname(host)
         if resolved != host: # Damit keine Doppelte Ausgabe erfolgt
-            print(f"Aufgelöst: {resolved}")
+            print(CLR_OK + f"Aufgelöst: {resolved}")
     except socket.gaierror:
-        print("Ungültiger Hostname.")
+        print(CLR_ERR + "[!] Ungültiger Hostname.")
         return
-    # Wir starten für jeden Port ein eigenen Task, der parallel im Hintegrund läuft.
-    # ThreadPoolExecutor sorgt dafür, dass die Anzahl der Task begrentzt sind (max_workers) 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(scan_port, resolved, p) for p in ports]
-        try:
-            for _ in as_completed(futures): # as_completed wartet auf fertige Tasks
-                pass # Ergebnisse werden in ScanPort ausgegeben
-        except KeyboardInterrupt:
-            print("\nScan abgebrochen.")
 
-    print(f"\nScan abgeschlossen. {openPorts} offene Ports gefunden.")
+    # Threads: adaptive Anzahl, max. DEFAULT_WORKERS
+    worker_count = min(max_workers, max(4, len(list(ports))))
+    print(CLR_INFO + f"[i] Using {worker_count} worker threads")
+    
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        # Erstellt parallel ausgeführte Scan-Aufgaben (Futures)
+        futures = [executor.submit(scan_port, resolved, p) for p in ports]
+    
+        try:
+            for _ in as_completed(futures):  # wartet, bis einzelne Tasks abgeschlossen sind
+                pass  # Ergebnisse werden direkt in scan_port ausgegeben
+        except KeyboardInterrupt:
+            print(CLR_ERR + "\n[!] Scan abgebrochen.")
+    
+    print(CLR_OK + f"\nScan abgeschlossen. {openPorts} offene Ports gefunden.")
+
 
 def show_banner():
-    print(r"""
+    print(CLR_HEADER + r"""
 ╔════════════════════════════════════════╗
 ║              PORTISCOPE 🕵️‍♂️             ║
 ║        by EmirhanCodes | v1.0.0        ║
 ╚════════════════════════════════════════╝
-""")
-
-
-
-
+""" + Style.RESET_ALL)
 
 #Programmstart / Main
 if __name__ == "__main__":
@@ -205,7 +229,7 @@ if __name__ == "__main__":
     hostIP = input("IP Adresse oder Hostname: ").strip()
     portRangeInput = input(
         "Wähle die Anzahl der Ports aus: 1: 0-1023 2: 0–49151 3: 0-65535 oder benutzerdefiniert z.B. 100-500: "
-    )
+    ).strip()
     # Gewählten Portbereich parsen 
     portRange = parse_port_range(portRangeInput)
     # Starten
@@ -214,6 +238,5 @@ if __name__ == "__main__":
 
 #Coming Soon
 # Service Erkennung
-# Farbige Cli
 # Fehlerlogging
 # Fortschrittsanzeige

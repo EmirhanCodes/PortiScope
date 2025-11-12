@@ -18,7 +18,7 @@ Dieses Projekt entstand als Lernprozesses, um ein tieferes Verständnis für fol
 ---
 
 ## 👁️‍🗨️ Ein Blick auf PortiScope
-![Bildschirmfoto 2025-11-08 um 20.41.52.png](img/Bildschirmfoto%202025-11-08%20um%2020.41.52.png)
+![Bild.png](img/Bild.png)
 ---
 
 ## ⚙️ Funktionen
